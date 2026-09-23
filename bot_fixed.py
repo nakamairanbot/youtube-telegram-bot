@@ -4,13 +4,14 @@
 ربات تلگرام برای ارسال خودکار ویدیوهای جدید از کانال‌های یوتیوب
 - ارسال عنوان + لینک + تامبنیل
 - شامل وب‌سرور Flask برای Render + UptimeRobot
-- بهبود یافته برای جلوگیری از ارسال تکراری و از دست رفتن ویدیوها در ریستارت
+- حلقه ربات در صورت کرش، خودش دوباره راه‌اندازی می‌شود
 """
 
 import time
 import json
 import os
 import threading
+import traceback
 import feedparser
 import telebot
 from datetime import datetime, timezone
@@ -29,24 +30,25 @@ YOUTUBE_CHANNELS = {
 }
 
 CHECK_INTERVAL = 300  # هر ۵ دقیقه
-
-# فایل محلی (روی Render رایگان ماندگار نیست، ولی برای حالت عادی خوبه)
 SEEN_FILE = "seen_videos.json"
-
-# اگر فایل seen وجود نداشت، فقط ویدیوهایی که کمتر از این ساعت پیش منتشر شدن رو ارسال کن
-# (جلوگیری از سیل پست‌های قدیمی وقتی سرویس ریستارت میشه)
 MAX_AGE_HOURS_ON_FIRST_RUN = 6
 
 # =================================================
 
 bot = telebot.TeleBot(BOT_TOKEN)
-
 app = Flask(__name__)
+
+# برای مانیتور کردن سلامت حلقه ربات
+bot_thread_alive = True
+last_bot_activity = time.time()
 
 
 @app.route("/")
 def health_check():
-    return "Bot is running ✅", 200
+    status = "Bot is running ✅"
+    if not bot_thread_alive:
+        status = "Bot thread is DOWN ❌"
+    return status, 200
 
 
 @app.route("/health")
@@ -63,8 +65,7 @@ def load_seen():
     if os.path.exists(SEEN_FILE):
         try:
             with open(SEEN_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                return set(data)
+                return set(json.load(f))
         except Exception as e:
             print(f"خطا در خواندن seen: {e}")
     return set()
@@ -83,7 +84,6 @@ def get_rss_url(channel_id):
 
 
 def parse_published(entry):
-    """تاریخ انتشار را به datetime تبدیل می‌کند"""
     try:
         published = entry.get("published") or entry.get("updated")
         if published:
@@ -110,11 +110,9 @@ def check_new_videos(seen, is_first_run=False):
                 link = entry.link
                 published_dt = parse_published(entry)
 
-                # روی اولین اجرا (وقتی فایل seen خالی است) فقط ویدیوهای خیلی جدید را بگیر
                 if is_first_run and published_dt:
                     age_hours = (now - published_dt).total_seconds() / 3600
                     if age_hours > MAX_AGE_HOURS_ON_FIRST_RUN:
-                        # قدیمی است → فقط به seen اضافه کن بدون ارسال
                         seen.add(video_id)
                         continue
 
@@ -178,62 +176,70 @@ def send_to_telegram(video):
 
 
 def bot_loop():
-    print("=" * 60)
-    print("ربات یوتیوب → تلگرام شروع به کار کرد")
-    print(f"کانال مقصد: {TELEGRAM_CHANNEL}")
-    print(f"تعداد کانال‌ها: {len(YOUTUBE_CHANNELS)}")
-    print(f"فاصله چک: هر {CHECK_INTERVAL} ثانیه")
-    print("=" * 60)
+    """حلقه اصلی ربات - در صورت کرش دوباره از اینجا شروع می‌شود"""
+    global bot_thread_alive, last_bot_activity
 
-    try:
-        me = bot.get_me()
-        print(f"✅ ربات متصل شد: @{me.username}")
-    except Exception as e:
-        print(f"❌ خطا در اتصال به تلگرام: {e}")
-        return
-
-    seen = load_seen()
-    is_first_run = len(seen) == 0
-    print(f"تعداد ویدیوهای ذخیره‌شده قبلی: {len(seen)}")
-    if is_first_run:
-        print(f"⚠️ اولین اجرا (فایل seen خالی). فقط ویدیوهای کمتر از {MAX_AGE_HOURS_ON_FIRST_RUN} ساعت اخیر ارسال می‌شوند.")
-
-    # یک بار چک اولیه
-    new_videos = check_new_videos(seen, is_first_run=is_first_run)
-    # ویدیوهای قدیمی که در check علامت‌گذاری شدن رو ذخیره کن
-    save_seen(seen)
-
-    if new_videos:
-        print(f"در اولین چک {len(new_videos)} ویدیوی جدید پیدا شد. در حال ارسال...")
-        for video in reversed(new_videos):
-            if send_to_telegram(video):
-                seen.add(video["id"])
-                save_seen(seen)
-            time.sleep(3)
-    else:
-        print("ویدیوی جدیدی برای ارسال وجود ندارد.")
-
-    # حلقه اصلی
-    while True:
+    while True:  # حلقه بیرونی برای ریستارت خودکار
         try:
-            time.sleep(CHECK_INTERVAL)
-            print(f"\n[{datetime.now()}] در حال چک کردن ویدیوهای جدید...")
+            bot_thread_alive = True
+            print("=" * 60)
+            print(f"[{datetime.now()}] 🚀 حلقه ربات شروع شد")
+            print(f"کانال مقصد: {TELEGRAM_CHANNEL}")
+            print("=" * 60)
 
-            new_videos = check_new_videos(seen, is_first_run=False)
+            try:
+                me = bot.get_me()
+                print(f"✅ ربات متصل شد: @{me.username}")
+            except Exception as e:
+                print(f"❌ خطا در اتصال به تلگرام: {e}")
+                time.sleep(30)
+                continue
+
+            seen = load_seen()
+            is_first_run = len(seen) == 0
+            print(f"تعداد ویدیوهای ذخیره‌شده قبلی: {len(seen)}")
+
+            if is_first_run:
+                print(f"⚠️ اولین اجرا. فقط ویدیوهای کمتر از {MAX_AGE_HOURS_ON_FIRST_RUN} ساعت اخیر ارسال می‌شوند.")
+
+            # چک اولیه
+            new_videos = check_new_videos(seen, is_first_run=is_first_run)
+            save_seen(seen)
 
             if new_videos:
-                print(f"🎯 {len(new_videos)} ویدیوی جدید پیدا شد!")
+                print(f"در چک اولیه {len(new_videos)} ویدیوی جدید پیدا شد.")
                 for video in reversed(new_videos):
                     if send_to_telegram(video):
                         seen.add(video["id"])
                         save_seen(seen)
                     time.sleep(3)
             else:
-                print("ویدیوی جدیدی نیست.")
+                print("ویدیوی جدیدی برای ارسال وجود ندارد.")
+
+            # حلقه اصلی چک کردن
+            while True:
+                last_bot_activity = time.time()
+                time.sleep(CHECK_INTERVAL)
+
+                print(f"\n[{datetime.now()}] در حال چک کردن ویدیوهای جدید...")
+                new_videos = check_new_videos(seen, is_first_run=False)
+
+                if new_videos:
+                    print(f"🎯 {len(new_videos)} ویدیوی جدید پیدا شد!")
+                    for video in reversed(new_videos):
+                        if send_to_telegram(video):
+                            seen.add(video["id"])
+                            save_seen(seen)
+                        time.sleep(3)
+                else:
+                    print("ویدیوی جدیدی نیست.")
 
         except Exception as e:
-            print(f"[{datetime.now()}] ❌ خطای کلی در حلقه: {e}")
-            time.sleep(60)
+            bot_thread_alive = False
+            print(f"\n[{datetime.now()}] ❌❌ حلقه ربات کرش کرد:")
+            print(traceback.format_exc())
+            print("⏳ ۱۰ ثانیه صبر می‌کنم و دوباره راه‌اندازی می‌کنم...")
+            time.sleep(10)
 
 
 def main():
@@ -241,7 +247,7 @@ def main():
     t = threading.Thread(target=bot_loop, daemon=True)
     t.start()
 
-    # وب‌سرور را در ترد اصلی نگه دار (برای Render و UptimeRobot)
+    # وب‌سرور را در ترد اصلی نگه دار
     run_flask()
 
 
