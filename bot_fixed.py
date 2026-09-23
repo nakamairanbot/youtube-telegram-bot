@@ -3,14 +3,18 @@
 """
 ربات تلگرام برای ارسال خودکار ویدیوهای جدید از کانال‌های یوتیوب
 - ارسال عنوان + لینک + تامبنیل
+- شامل یک وب‌سرور کوچک (Flask) تا روی رندر به عنوان Web Service سالم بماند
+  و UptimeRobot بتواند بهش پینگ بزند
 """
 
 import time
 import json
 import os
+import threading
 import feedparser
 import telebot
 from datetime import datetime
+from flask import Flask
 
 # ==================== تنظیمات ====================
 BOT_TOKEN = "8849761551:AAFeQb24l5btt5ruzfMVzG4eupYGccN5l9c"
@@ -33,6 +37,22 @@ SEEN_FILE = "seen_videos.json"
 # =================================================
 
 bot = telebot.TeleBot(BOT_TOKEN)
+
+# ---------------- وب‌سرور سلامت (برای رندر و UptimeRobot) ----------------
+app = Flask(__name__)
+
+
+@app.route("/")
+def health_check():
+    return "Bot is running", 200
+
+
+def run_flask():
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
+
+
+# ==========================================================================
 
 
 def load_seen():
@@ -96,7 +116,6 @@ def send_to_telegram(video):
 
     try:
         if video.get("thumbnail"):
-            # ارسال عکس تامبنیل + کپشن
             bot.send_photo(
                 TELEGRAM_CHANNEL,
                 photo=video["thumbnail"],
@@ -104,7 +123,6 @@ def send_to_telegram(video):
                 parse_mode="HTML"
             )
         else:
-            # اگر تامبنیل نبود، فقط متن بفرست
             bot.send_message(
                 TELEGRAM_CHANNEL,
                 caption,
@@ -114,8 +132,7 @@ def send_to_telegram(video):
         print(f"[{datetime.now()}] ارسال شد: {video['title'][:50]}...")
         return True
     except Exception as e:
-        print(f"[{datetime.now()}] خطا در ارسال به تلگرام: {e}")
-        # اگر ارسال عکس شکست خورد، متن ساده بفرست
+        print(f"[{datetime.now()}] خطا در ارسال به تلگرام (عکس): {e}")
         try:
             bot.send_message(
                 TELEGRAM_CHANNEL,
@@ -130,7 +147,7 @@ def send_to_telegram(video):
             return False
 
 
-def main():
+def bot_loop():
     print("=" * 50)
     print("ربات یوتیوب → تلگرام شروع به کار کرد")
     print(f"کانال مقصد: {TELEGRAM_CHANNEL}")
@@ -138,7 +155,6 @@ def main():
     print(f"فاصله چک: هر {CHECK_INTERVAL} ثانیه")
     print("=" * 50)
 
-    # تست اتصال به تلگرام
     try:
         me = bot.get_me()
         print(f"ربات متصل شد: @{me.username}")
@@ -150,23 +166,21 @@ def main():
     seen = load_seen()
     print(f"تعداد ویدیوهای قبلی ذخیره شده: {len(seen)}")
 
-    # بار اول فقط ویدیوهای فعلی را به عنوان دیده شده ذخیره کن (تا پست قدیمی نفرستد)
     print("در حال بارگذاری ویدیوهای فعلی (بدون ارسال)...")
     first_run = check_new_videos(seen)
     for v in first_run:
         seen.add(v["id"])
     save_seen(seen)
-    print(f"ویدیوهای فعلی به عنوان دیده شده ذخیره شدند. از این به بعد فقط ویدیوی جدید ارسال می‌شود.")
+    print("ویدیوهای فعلی به عنوان دیده شده ذخیره شدند. از این به بعد فقط ویدیوی جدید ارسال می‌شود.")
 
     while True:
         try:
             new_videos = check_new_videos(seen)
-            # جدیدترین‌ها را اول بفرست (برعکس لیست)
             for video in reversed(new_videos):
                 if send_to_telegram(video):
                     seen.add(video["id"])
                     save_seen(seen)
-                time.sleep(2)  # کمی فاصله بین ارسال‌ها
+                time.sleep(2)
 
             if new_videos:
                 print(f"[{datetime.now()}] {len(new_videos)} ویدیوی جدید پیدا و ارسال شد.")
@@ -177,6 +191,15 @@ def main():
             print(f"[{datetime.now()}] خطای کلی: {e}")
 
         time.sleep(CHECK_INTERVAL)
+
+
+def main():
+    # حلقه‌ی اصلی ربات را در یک ترد جدا اجرا کن
+    t = threading.Thread(target=bot_loop, daemon=True)
+    t.start()
+
+    # وب‌سرور را در ترد اصلی اجرا کن تا رندر سرویس را "سالم" ببیند
+    run_flask()
 
 
 if __name__ == "__main__":
