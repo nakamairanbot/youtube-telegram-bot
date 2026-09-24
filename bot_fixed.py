@@ -3,8 +3,9 @@
 """
 ربات تلگرام برای ارسال خودکار ویدیوهای جدید از کانال‌های یوتیوب
 - ارسال عنوان + لینک + تامبنیل
-- شامل وب‌سرور Flask برای Render + UptimeRobot
-- حلقه ربات در صورت کرش، خودش دوباره راه‌اندازی می‌شود
+- ذخیره‌سازی ماندگار لیست ویدیوها با jsonbin.io (دیگر تکراری نمی‌فرستد)
+- حلقه ریستارت خودکار در صورت کرش
+- وب‌سرور Flask برای Render + UptimeRobot
 """
 
 import time
@@ -14,6 +15,7 @@ import threading
 import traceback
 import feedparser
 import telebot
+import requests
 from datetime import datetime, timezone
 from dateutil import parser as date_parser
 from flask import Flask
@@ -30,24 +32,26 @@ YOUTUBE_CHANNELS = {
 }
 
 CHECK_INTERVAL = 300  # هر ۵ دقیقه
-SEEN_FILE = "seen_videos.json"
-MAX_AGE_HOURS_ON_FIRST_RUN = 6
+
+# --- تنظیمات jsonbin.io (ذخیره‌سازی ماندگار) ---
+JSONBIN_ID = "6ab4fa99ac6210605af05e47"
+JSONBIN_KEY = "$2a$10$hwRQ7ooZi5kcfK7iY.cE4.qlT8.jN1mihqGXoeP.I8e0mQyrr4svy"
+JSONBIN_URL = f"https://api.jsonbin.io/v3/b/{JSONBIN_ID}"
+
+# حداکثر تعداد ID که نگه می‌داریم (برای جلوگیری از بزرگ شدن بیش از حد)
+MAX_SEEN_IDS = 300
 
 # =================================================
 
 bot = telebot.TeleBot(BOT_TOKEN)
 app = Flask(__name__)
 
-# برای مانیتور کردن سلامت حلقه ربات
 bot_thread_alive = True
-last_bot_activity = time.time()
 
 
 @app.route("/")
 def health_check():
-    status = "Bot is running ✅"
-    if not bot_thread_alive:
-        status = "Bot thread is DOWN ❌"
+    status = "Bot is running ✅" if bot_thread_alive else "Bot thread is DOWN ❌"
     return status, 200
 
 
@@ -62,21 +66,49 @@ def run_flask():
 
 
 def load_seen():
-    if os.path.exists(SEEN_FILE):
-        try:
-            with open(SEEN_FILE, "r", encoding="utf-8") as f:
-                return set(json.load(f))
-        except Exception as e:
-            print(f"خطا در خواندن seen: {e}")
+    """خواندن لیست ویدیوهای دیده‌شده از jsonbin"""
+    try:
+        headers = {
+            "X-Master-Key": JSONBIN_KEY
+        }
+        r = requests.get(f"{JSONBIN_URL}/latest", headers=headers, timeout=15)
+        if r.status_code == 200:
+            data = r.json()
+            record = data.get("record", {})
+            # پشتیبانی از هر دو فرمت ممکن
+            if isinstance(record, list):
+                seen = set(record)
+            elif isinstance(record, dict):
+                seen = set(record.get("seen", record.get("seen_videos", [])))
+            else:
+                seen = set()
+            print(f"✅ لیست seen از jsonbin لود شد ({len(seen)} مورد)")
+            return seen
+        else:
+            print(f"⚠️ خطا در خواندن jsonbin: {r.status_code} - {r.text[:200]}")
+    except Exception as e:
+        print(f"⚠️ خطا در اتصال به jsonbin (خواندن): {e}")
     return set()
 
 
 def save_seen(seen):
+    """ذخیره لیست ویدیوهای دیده‌شده در jsonbin"""
     try:
-        with open(SEEN_FILE, "w", encoding="utf-8") as f:
-            json.dump(list(seen), f, ensure_ascii=False, indent=2)
+        # فقط آخرین MAX_SEEN_IDS تا را نگه دار
+        seen_list = list(seen)[-MAX_SEEN_IDS:]
+        payload = {"seen": seen_list}
+
+        headers = {
+            "X-Master-Key": JSONBIN_KEY,
+            "Content-Type": "application/json"
+        }
+        r = requests.put(JSONBIN_URL, json=payload, headers=headers, timeout=15)
+        if r.status_code in (200, 201):
+            print(f"💾 لیست seen ذخیره شد ({len(seen_list)} مورد)")
+        else:
+            print(f"⚠️ خطا در ذخیره jsonbin: {r.status_code} - {r.text[:200]}")
     except Exception as e:
-        print(f"خطا در ذخیره seen: {e}")
+        print(f"⚠️ خطا در اتصال به jsonbin (ذخیره): {e}")
 
 
 def get_rss_url(channel_id):
@@ -93,10 +125,8 @@ def parse_published(entry):
     return None
 
 
-def check_new_videos(seen, is_first_run=False):
+def check_new_videos(seen):
     new_videos = []
-    now = datetime.now(timezone.utc)
-
     for name, channel_id in YOUTUBE_CHANNELS.items():
         try:
             feed = feedparser.parse(get_rss_url(channel_id))
@@ -109,12 +139,6 @@ def check_new_videos(seen, is_first_run=False):
                 title = entry.title
                 link = entry.link
                 published_dt = parse_published(entry)
-
-                if is_first_run and published_dt:
-                    age_hours = (now - published_dt).total_seconds() / 3600
-                    if age_hours > MAX_AGE_HOURS_ON_FIRST_RUN:
-                        seen.add(video_id)
-                        continue
 
                 thumbnail = None
                 if hasattr(entry, "media_thumbnail") and entry.media_thumbnail:
@@ -131,7 +155,6 @@ def check_new_videos(seen, is_first_run=False):
                 })
         except Exception as e:
             print(f"[{datetime.now()}] خطا در چک کردن {name}: {e}")
-
     return new_videos
 
 
@@ -141,7 +164,6 @@ def send_to_telegram(video):
         f"📺 کانال: <b>{video['channel']}</b>\n"
         f"🔗 {video['link']}"
     )
-
     try:
         if video.get("thumbnail"):
             bot.send_photo(
@@ -176,10 +198,9 @@ def send_to_telegram(video):
 
 
 def bot_loop():
-    """حلقه اصلی ربات - در صورت کرش دوباره از اینجا شروع می‌شود"""
-    global bot_thread_alive, last_bot_activity
+    global bot_thread_alive
 
-    while True:  # حلقه بیرونی برای ریستارت خودکار
+    while True:
         try:
             bot_thread_alive = True
             print("=" * 60)
@@ -195,17 +216,12 @@ def bot_loop():
                 time.sleep(30)
                 continue
 
+            # لود لیست ماندگار از jsonbin
             seen = load_seen()
-            is_first_run = len(seen) == 0
-            print(f"تعداد ویدیوهای ذخیره‌شده قبلی: {len(seen)}")
-
-            if is_first_run:
-                print(f"⚠️ اولین اجرا. فقط ویدیوهای کمتر از {MAX_AGE_HOURS_ON_FIRST_RUN} ساعت اخیر ارسال می‌شوند.")
+            print(f"تعداد ویدیوهای ذخیره‌شده: {len(seen)}")
 
             # چک اولیه
-            new_videos = check_new_videos(seen, is_first_run=is_first_run)
-            save_seen(seen)
-
+            new_videos = check_new_videos(seen)
             if new_videos:
                 print(f"در چک اولیه {len(new_videos)} ویدیوی جدید پیدا شد.")
                 for video in reversed(new_videos):
@@ -216,14 +232,12 @@ def bot_loop():
             else:
                 print("ویدیوی جدیدی برای ارسال وجود ندارد.")
 
-            # حلقه اصلی چک کردن
+            # حلقه اصلی
             while True:
-                last_bot_activity = time.time()
                 time.sleep(CHECK_INTERVAL)
-
                 print(f"\n[{datetime.now()}] در حال چک کردن ویدیوهای جدید...")
-                new_videos = check_new_videos(seen, is_first_run=False)
 
+                new_videos = check_new_videos(seen)
                 if new_videos:
                     print(f"🎯 {len(new_videos)} ویدیوی جدید پیدا شد!")
                     for video in reversed(new_videos):
@@ -243,11 +257,8 @@ def bot_loop():
 
 
 def main():
-    # ربات را در ترد جداگانه اجرا کن
     t = threading.Thread(target=bot_loop, daemon=True)
     t.start()
-
-    # وب‌سرور را در ترد اصلی نگه دار
     run_flask()
 
 
