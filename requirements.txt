@@ -1,4 +1,5 @@
 pyTelegramBotAPI
 feedparser
-flask
+Flask
 python-dateutil
+requests
