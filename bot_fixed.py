@@ -3,9 +3,9 @@
 """
 ربات تلگرام برای ارسال خودکار ویدیوهای جدید از کانال‌های یوتیوب
 - ارسال عنوان + لینک + تامبنیل
-- ذخیره‌سازی ماندگار لیست ویدیوها با jsonbin.io (دیگر تکراری نمی‌فرستد)
-- حلقه ریستارت خودکار در صورت کرش
-- وب‌سرور Flask برای Render + UptimeRobot
+- ذخیره‌سازی ماندگار با jsonbin.io
+- اگر لیست seen خالی باشد، ویدیوهای فعلی را فقط علامت می‌زند (نمی‌فرستد)
+- حلقه ریستارت خودکار + Flask
 """
 
 import time
@@ -33,19 +33,16 @@ YOUTUBE_CHANNELS = {
 
 CHECK_INTERVAL = 300  # هر ۵ دقیقه
 
-# --- تنظیمات jsonbin.io (ذخیره‌سازی ماندگار) ---
 JSONBIN_ID = "6ab4fa99ac6210605af05e47"
 JSONBIN_KEY = "$2a$10$hwRQ7ooZi5kcfK7iY.cE4.qlT8.jN1mihqGXoeP.I8e0mQyrr4svy"
 JSONBIN_URL = f"https://api.jsonbin.io/v3/b/{JSONBIN_ID}"
 
-# حداکثر تعداد ID که نگه می‌داریم (برای جلوگیری از بزرگ شدن بیش از حد)
 MAX_SEEN_IDS = 300
 
 # =================================================
 
 bot = telebot.TeleBot(BOT_TOKEN)
 app = Flask(__name__)
-
 bot_thread_alive = True
 
 
@@ -66,16 +63,12 @@ def run_flask():
 
 
 def load_seen():
-    """خواندن لیست ویدیوهای دیده‌شده از jsonbin"""
     try:
-        headers = {
-            "X-Master-Key": JSONBIN_KEY
-        }
+        headers = {"X-Master-Key": JSONBIN_KEY}
         r = requests.get(f"{JSONBIN_URL}/latest", headers=headers, timeout=15)
         if r.status_code == 200:
             data = r.json()
             record = data.get("record", {})
-            # پشتیبانی از هر دو فرمت ممکن
             if isinstance(record, list):
                 seen = set(record)
             elif isinstance(record, dict):
@@ -92,12 +85,9 @@ def load_seen():
 
 
 def save_seen(seen):
-    """ذخیره لیست ویدیوهای دیده‌شده در jsonbin"""
     try:
-        # فقط آخرین MAX_SEEN_IDS تا را نگه دار
         seen_list = list(seen)[-MAX_SEEN_IDS:]
         payload = {"seen": seen_list}
-
         headers = {
             "X-Master-Key": JSONBIN_KEY,
             "Content-Type": "application/json"
@@ -125,6 +115,20 @@ def parse_published(entry):
     return None
 
 
+def get_current_video_ids():
+    """همه IDهای فعلی کانال‌ها را برمی‌گرداند (بدون ارسال)"""
+    ids = set()
+    for name, channel_id in YOUTUBE_CHANNELS.items():
+        try:
+            feed = feedparser.parse(get_rss_url(channel_id))
+            for entry in feed.entries[:10]:
+                video_id = getattr(entry, "yt_videoid", None) or entry.id.split(":")[-1]
+                ids.add(video_id)
+        except Exception as e:
+            print(f"خطا در گرفتن IDهای {name}: {e}")
+    return ids
+
+
 def check_new_videos(seen):
     new_videos = []
     for name, channel_id in YOUTUBE_CHANNELS.items():
@@ -132,7 +136,6 @@ def check_new_videos(seen):
             feed = feedparser.parse(get_rss_url(channel_id))
             for entry in feed.entries[:8]:
                 video_id = getattr(entry, "yt_videoid", None) or entry.id.split(":")[-1]
-
                 if video_id in seen:
                     continue
 
@@ -216,21 +219,28 @@ def bot_loop():
                 time.sleep(30)
                 continue
 
-            # لود لیست ماندگار از jsonbin
             seen = load_seen()
             print(f"تعداد ویدیوهای ذخیره‌شده: {len(seen)}")
 
-            # چک اولیه
-            new_videos = check_new_videos(seen)
-            if new_videos:
-                print(f"در چک اولیه {len(new_videos)} ویدیوی جدید پیدا شد.")
-                for video in reversed(new_videos):
-                    if send_to_telegram(video):
-                        seen.add(video["id"])
-                        save_seen(seen)
-                    time.sleep(3)
+            # اگر لیست خالی است → فقط ویدیوهای فعلی را علامت بزن و ذخیره کن (نفرست)
+            if len(seen) == 0:
+                print("⚠️ لیست seen خالی است. ویدیوهای فعلی را فقط علامت می‌زنم (ارسال نمی‌کنم)...")
+                current_ids = get_current_video_ids()
+                seen.update(current_ids)
+                save_seen(seen)
+                print(f"✅ {len(current_ids)} ویدیوی فعلی به عنوان دیده‌شده ذخیره شد. از این به بعد فقط ویدیوی جدید ارسال می‌شود.")
             else:
-                print("ویدیوی جدیدی برای ارسال وجود ندارد.")
+                # لیست از قبل وجود دارد → چک عادی
+                new_videos = check_new_videos(seen)
+                if new_videos:
+                    print(f"در چک اولیه {len(new_videos)} ویدیوی جدید پیدا شد.")
+                    for video in reversed(new_videos):
+                        if send_to_telegram(video):
+                            seen.add(video["id"])
+                            save_seen(seen)
+                        time.sleep(3)
+                else:
+                    print("ویدیوی جدیدی برای ارسال وجود ندارد.")
 
             # حلقه اصلی
             while True:
