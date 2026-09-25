@@ -101,22 +101,26 @@ def debug():
         data = r.json()
         if data.get("ok"):
             username = data["result"].get("username")
+            bot_id = data["result"]["id"]
             try:
-                admins = requests.get(
-                    f"{TELEGRAM_API}/getChatAdministrators",
-                    params={"chat_id": TELEGRAM_CHANNEL},
+                member = requests.get(
+                    f"{TELEGRAM_API}/getChatMember",
+                    params={"chat_id": TELEGRAM_CHANNEL, "user_id": bot_id},
                     timeout=NET_TIMEOUT,
                 ).json()
-                admin_ids = [a["user"]["id"] for a in admins.get("result", [])]
-                is_admin = data["result"]["id"] in admin_ids
-                result["telegram"] = {
-                    "ok": True,
-                    "username": username,
-                    "is_admin_of_channel": is_admin,
-                    "channel": TELEGRAM_CHANNEL,
-                }
+                if member.get("ok"):
+                    status = member["result"]["status"]
+                    result["telegram"] = {
+                        "ok": True,
+                        "username": username,
+                        "bot_status_in_channel": status,
+                        "can_send": status in ("administrator", "creator"),
+                        "channel": TELEGRAM_CHANNEL,
+                    }
+                else:
+                    result["telegram"] = {"ok": True, "username": username, "member_check_error": member}
             except Exception as e:
-                result["telegram"] = {"ok": True, "username": username, "admin_check_error": str(e)}
+                result["telegram"] = {"ok": True, "username": username, "member_check_error": str(e)}
         else:
             result["telegram"] = {"ok": False, "response": data}
     except requests.exceptions.Timeout:
@@ -185,31 +189,33 @@ def check_bot_channel_access():
 
     try:
         r = requests.get(
-            f"{TELEGRAM_API}/getChatAdministrators",
-            params={"chat_id": TELEGRAM_CHANNEL},
+            f"{TELEGRAM_API}/getChatMember",
+            params={"chat_id": TELEGRAM_CHANNEL, "user_id": me["id"]},
             timeout=NET_TIMEOUT,
         )
         data = r.json()
         if not data.get("ok"):
-            last_error = f"getChatAdministrators ناموفق: {data}"
-            print(f"⚠️ نتونستم ادمین‌های {TELEGRAM_CHANNEL} رو بگیرم: {data}")
+            # اگه این متد هم به هر دلیلی جواب نداد (مثلاً کانال خیلی بزرگه)،
+            # به‌جای گیر کردن تو حلقه، اجازه می‌دیم ادامه بده و تلاش برای ارسال واقعی رو امتحان کنه.
+            last_error = f"getChatMember ناموفق: {data}"
+            print(f"⚠️ نتونستم وضعیت ربات تو {TELEGRAM_CHANNEL} رو چک کنم: {data} - با این‌حال ادامه می‌دم.")
+            return True
+        status = data["result"]["status"]
+        if status not in ("administrator", "creator"):
+            last_error = f"ربات ادمین کانال نیست (status={status})"
+            print(f"❌ ربات @{me.get('username')} توی کانال {TELEGRAM_CHANNEL} ادمین نیست (status={status}).")
             return False
-        admin_ids = [a["user"]["id"] for a in data["result"]]
-        if me["id"] not in admin_ids:
-            last_error = "ربات ادمین کانال نیست"
-            print(f"❌ ربات @{me.get('username')} توی کانال {TELEGRAM_CHANNEL} ادمین نیست.")
-            return False
-        print(f"✅ ربات در کانال {TELEGRAM_CHANNEL} ادمینه.")
+        print(f"✅ ربات در کانال {TELEGRAM_CHANNEL} ادمینه (status={status}).")
         last_error = None
         return True
     except requests.exceptions.Timeout:
-        last_error = "timeout در getChatAdministrators"
-        print("❌ تایم‌اوت در گرفتن لیست ادمین‌ها.")
-        return False
+        last_error = "timeout در getChatMember"
+        print("⚠️ تایم‌اوت در چک وضعیت ربات - با این‌حال ادامه می‌دم.")
+        return True
     except Exception as e:
         last_error = str(e)
-        print(f"⚠️ خطا در گرفتن لیست ادمین‌ها: {e}")
-        return False
+        print(f"⚠️ خطا در چک وضعیت ربات: {e} - با این‌حال ادامه می‌دم.")
+        return True
 
 
 def load_seen():
