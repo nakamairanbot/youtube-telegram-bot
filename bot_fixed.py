@@ -116,7 +116,6 @@ def parse_published(entry):
 
 
 def get_current_video_ids():
-    """همه IDهای فعلی کانال‌ها را برمی‌گرداند (بدون ارسال)"""
     ids = set()
     for name, channel_id in YOUTUBE_CHANNELS.items():
         try:
@@ -138,16 +137,13 @@ def check_new_videos(seen):
                 video_id = getattr(entry, "yt_videoid", None) or entry.id.split(":")[-1]
                 if video_id in seen:
                     continue
-
                 title = entry.title
                 link = entry.link
                 published_dt = parse_published(entry)
-
                 thumbnail = None
                 if hasattr(entry, "media_thumbnail") and entry.media_thumbnail:
                     thumbnail = entry.media_thumbnail[0]["url"]
                     thumbnail = thumbnail.replace("hqdefault.jpg", "maxresdefault.jpg")
-
                 new_videos.append({
                     "id": video_id,
                     "title": title,
@@ -202,7 +198,6 @@ def send_to_telegram(video):
 
 def bot_loop():
     global bot_thread_alive
-
     while True:
         try:
             bot_thread_alive = True
@@ -222,15 +217,13 @@ def bot_loop():
             seen = load_seen()
             print(f"تعداد ویدیوهای ذخیره‌شده: {len(seen)}")
 
-            # اگر لیست خالی است → فقط ویدیوهای فعلی را علامت بزن و ذخیره کن (نفرست)
             if len(seen) == 0:
                 print("⚠️ لیست seen خالی است. ویدیوهای فعلی را فقط علامت می‌زنم (ارسال نمی‌کنم)...")
                 current_ids = get_current_video_ids()
                 seen.update(current_ids)
                 save_seen(seen)
-                print(f"✅ {len(current_ids)} ویدیوی فعلی به عنوان دیده‌شده ذخیره شد. از این به بعد فقط ویدیوی جدید ارسال می‌شود.")
+                print(f"✅ {len(current_ids)} ویدیوی فعلی به عنوان دیده‌شده ذخیره شد.")
             else:
-                # لیست از قبل وجود دارد → چک عادی
                 new_videos = check_new_videos(seen)
                 if new_videos:
                     print(f"در چک اولیه {len(new_videos)} ویدیوی جدید پیدا شد.")
@@ -242,11 +235,9 @@ def bot_loop():
                 else:
                     print("ویدیوی جدیدی برای ارسال وجود ندارد.")
 
-            # حلقه اصلی
             while True:
                 time.sleep(CHECK_INTERVAL)
                 print(f"\n[{datetime.now()}] در حال چک کردن ویدیوهای جدید...")
-
                 new_videos = check_new_videos(seen)
                 if new_videos:
                     print(f"🎯 {len(new_videos)} ویدیوی جدید پیدا شد!")
